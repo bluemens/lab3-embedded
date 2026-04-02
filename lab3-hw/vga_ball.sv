@@ -1,59 +1,100 @@
 /*
  * Avalon memory-mapped peripheral that generates VGA
+ * with a bouncing ball at software-controllable coordinates
  *
  * Stephen A. Edwards
  * Columbia University
  *
- * Register map:
- * 
- * Byte Offset  7 ... 0   Meaning
- *        0    |  Red  |  Red component of background color (0-255)
- *        1    | Green |  Green component
- *        2    | Blue  |  Blue component
+ * Register map (16-bit writedata):
+ *
+ * Word Offset   15 ······· 0    Meaning
+ *      0       |   ball_x   |   X coordinate of ball center (0–639)
+ *      1       |   ball_y   |   Y coordinate of ball center (0–479)
+ *
+ * Byte addresses from the CPU: offset 0 = ball_x, offset 2 = ball_y
+ * Ball radius is fixed at 16 pixels in hardware.
+ * Coordinates are latched at the start of vertical blanking to
+ * prevent tearing.
  */
 
-module vga_ball(input logic        clk,
-	        input logic 	   reset,
-		input logic [7:0]  writedata,
-		input logic 	   write,
-		input 		   chipselect,
-		input logic [2:0]  address,
+module vga_ball(input logic         clk,
+		input logic 	    reset,
+		input logic [15:0]  writedata,
+		input logic 	    write,
+		input 		    chipselect,
+		input logic [2:0]   address,
 
-		output logic [7:0] VGA_R, VGA_G, VGA_B,
-		output logic 	   VGA_CLK, VGA_HS, VGA_VS,
-		                   VGA_BLANK_n,
-		output logic 	   VGA_SYNC_n);
+		output logic [7:0]  VGA_R, VGA_G, VGA_B,
+		output logic 	    VGA_CLK, VGA_HS, VGA_VS,
+		                    VGA_BLANK_n,
+		output logic 	    VGA_SYNC_n);
 
-   logic [10:0]	   hcount;
+   logic [10:0]    hcount;
    logic [9:0]     vcount;
 
-   logic [7:0] 	   background_r, background_g, background_b;
-	
+   /* Ball position registers (written by software) */
+   logic [15:0]    ball_x, ball_y;
+
+   /* Active copies latched during vertical blanking (used for drawing) */
+   logic [15:0]    ball_x_active, ball_y_active;
+
+   parameter BALL_RADIUS = 16;
+
    vga_counters counters(.clk50(clk), .*);
 
+   /* ---- Register writes from the Avalon bus ---- */
    always_ff @(posedge clk)
      if (reset) begin
-	background_r <= 8'h0;
-	background_g <= 8'h0;
-	background_b <= 8'h80;
+	ball_x <= 16'd320;
+	ball_y <= 16'd240;
      end else if (chipselect && write)
        case (address)
-	 3'h0 : background_r <= writedata;
-	 3'h1 : background_g <= writedata;
-	 3'h2 : background_b <= writedata;
+	 3'h0 : ball_x <= writedata;
+	 3'h1 : ball_y <= writedata;
        endcase
 
+   /* ---- Latch coordinates at start of vertical blanking ---- */
+   always_ff @(posedge clk)
+     if (reset) begin
+	ball_x_active <= 16'd320;
+	ball_y_active <= 16'd240;
+     end else if (vcount == 10'd480 && hcount == 11'd0) begin
+	ball_x_active <= ball_x;
+	ball_y_active <= ball_y;
+     end
+
+   /* ---- Ball drawing logic ---- */
+   logic [9:0] pixel_x;
+   logic [9:0] pixel_y;
+   assign pixel_x = hcount[10:1];   /* pixel column 0-639 in active area */
+   assign pixel_y = vcount[9:0];    /* pixel row    0-479 in active area */
+
+   /* Absolute distance from pixel to ball center */
+   logic [9:0] abs_dx, abs_dy;
+   assign abs_dx = (pixel_x >= ball_x_active[9:0])
+		   ? (pixel_x - ball_x_active[9:0])
+		   : (ball_x_active[9:0] - pixel_x);
+   assign abs_dy = (pixel_y >= ball_y_active[9:0])
+		   ? (pixel_y - ball_y_active[9:0])
+		   : (ball_y_active[9:0] - pixel_y);
+
+   /* Circle test: dx^2 + dy^2 <= R^2 */
+   logic [19:0] dist_sq;
+   assign dist_sq = abs_dx * abs_dx + abs_dy * abs_dy;
+
+   logic in_ball;
+   assign in_ball = (dist_sq <= BALL_RADIUS * BALL_RADIUS);
+
+   /* ---- Pixel output ---- */
    always_comb begin
       {VGA_R, VGA_G, VGA_B} = {8'h0, 8'h0, 8'h0};
-      if (VGA_BLANK_n )
-	if (hcount[10:6] == 5'd3 &&
-	    vcount[9:5] == 5'd3)
-	  {VGA_R, VGA_G, VGA_B} = {8'hff, 8'hff, 8'hff};
+      if (VGA_BLANK_n)
+	if (in_ball)
+	  {VGA_R, VGA_G, VGA_B} = {8'hff, 8'hff, 8'hff};  /* white ball */
 	else
-	  {VGA_R, VGA_G, VGA_B} =
-             {background_r, background_g, background_b};
+	  {VGA_R, VGA_G, VGA_B} = {8'h00, 8'h00, 8'h80};  /* dark blue bg */
    end
-	       
+
 endmodule
 
 module vga_counters(
@@ -64,12 +105,12 @@ module vga_counters(
 
 /*
  * 640 X 480 VGA timing for a 50 MHz clock: one pixel every other cycle
- * 
+ *
  * HCOUNT 1599 0             1279       1599 0
  *             _______________              ________
  * ___________|    Video      |____________|  Video
- * 
- * 
+ *
+ *
  * |SYNC| BP |<-- HACTIVE -->|FP|SYNC| BP |<-- HACTIVE
  *       _______________________      _____________
  * |____|       VGA_HS          |____|
@@ -78,10 +119,10 @@ module vga_counters(
    parameter HACTIVE      = 11'd 1280,
              HFRONT_PORCH = 11'd 32,
              HSYNC        = 11'd 192,
-             HBACK_PORCH  = 11'd 96,   
+             HBACK_PORCH  = 11'd 96,
              HTOTAL       = HACTIVE + HFRONT_PORCH + HSYNC +
                             HBACK_PORCH; // 1600
-   
+
    // Parameters for vcount
    parameter VACTIVE      = 10'd 480,
              VFRONT_PORCH = 10'd 10,
@@ -91,16 +132,16 @@ module vga_counters(
                             VBACK_PORCH; // 525
 
    logic endOfLine;
-   
+
    always_ff @(posedge clk50 or posedge reset)
      if (reset)          hcount <= 0;
      else if (endOfLine) hcount <= 0;
      else  	         hcount <= hcount + 11'd 1;
 
    assign endOfLine = hcount == HTOTAL - 1;
-       
+
    logic endOfField;
-   
+
    always_ff @(posedge clk50 or posedge reset)
      if (reset)          vcount <= 0;
      else if (endOfLine)
@@ -116,7 +157,7 @@ module vga_counters(
    assign VGA_VS = !( vcount[9:1] == (VACTIVE + VFRONT_PORCH) / 2);
 
    assign VGA_SYNC_n = 1'b0; // For putting sync on the green signal; unused
-   
+
    // Horizontal active: 0 to 1279     Vertical active: 0 to 479
    // 101 0000 0000  1280	       01 1110 0000  480
    // 110 0011 1111  1599	       10 0000 1100  524
@@ -126,10 +167,10 @@ module vga_counters(
    /* VGA_CLK is 25 MHz
     *             __    __    __
     * clk50    __|  |__|  |__|
-    *        
+    *
     *             _____       __
     * hcount[0]__|     |_____|
     */
    assign VGA_CLK = hcount[0]; // 25 MHz clock: rising edge sensitive
-   
+
 endmodule
