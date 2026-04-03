@@ -1,7 +1,7 @@
 /*
  * Userspace program that bounces a ball on the VGA display
- * by communicating coordinates to the vga_ball device driver
- * through ioctls
+ * by communicating coordinates and colors to the vga_ball
+ * device driver through ioctls
  *
  * Stephen A. Edwards
  * Columbia University
@@ -22,25 +22,29 @@
 
 int vga_ball_fd;
 
-void set_ball_position(int x, int y)
+void set_ball(int x, int y, unsigned short ball_color,
+	      unsigned short bg_color)
 {
 	vga_ball_arg_t vla;
-	vla.position.x = x;
-	vla.position.y = y;
-	if (ioctl(vga_ball_fd, VGA_BALL_WRITE_POS, &vla)) {
-		perror("ioctl(VGA_BALL_WRITE_POS) failed");
+	vla.x = x;
+	vla.y = y;
+	vla.ball_color = ball_color;
+	vla.bg_color = bg_color;
+	if (ioctl(vga_ball_fd, VGA_BALL_WRITE_BALL, &vla)) {
+		perror("ioctl(VGA_BALL_WRITE_BALL) failed");
 		return;
 	}
 }
 
-void read_ball_position(void)
+void read_ball(void)
 {
 	vga_ball_arg_t vla;
-	if (ioctl(vga_ball_fd, VGA_BALL_READ_POS, &vla)) {
-		perror("ioctl(VGA_BALL_READ_POS) failed");
+	if (ioctl(vga_ball_fd, VGA_BALL_READ_BALL, &vla)) {
+		perror("ioctl(VGA_BALL_READ_BALL) failed");
 		return;
 	}
-	printf("Ball position: (%d, %d)\n", vla.position.x, vla.position.y);
+	printf("Ball: (%d, %d) color=0x%04x bg=0x%04x\n",
+	       vla.x, vla.y, vla.ball_color, vla.bg_color);
 }
 
 int main()
@@ -52,6 +56,9 @@ int main()
 	int dx = 3;
 	int dy = 2;
 
+	unsigned short ball_color = RGB565(0xFF, 0xFF, 0x00); /* yellow ball */
+	unsigned short bg_color   = RGB565(0x00, 0x00, 0x80); /* dark blue bg */
+
 	printf("VGA ball bouncing demo started\n");
 
 	if ((vga_ball_fd = open(filename, O_RDWR)) == -1) {
@@ -60,7 +67,7 @@ int main()
 	}
 
 	printf("initial state: ");
-	read_ball_position();
+	read_ball();
 
 	while (1) {
 		x += dx;
@@ -78,7 +85,7 @@ int main()
 			y += 2 * dy;
 		}
 
-		set_ball_position(x, y);
+		set_ball(x, y, ball_color, bg_color);
 		usleep(16667); /* ~60 frames per second */
 	}
 

@@ -39,9 +39,13 @@
  * Device registers (byte offsets for 16-bit data width)
  * Word 0 (byte 0): ball_x
  * Word 1 (byte 2): ball_y
+ * Word 2 (byte 4): ball_color (RGB565)
+ * Word 3 (byte 6): bg_color   (RGB565)
  */
-#define BALL_X(x) (x)
-#define BALL_Y(x) ((x)+2)
+#define BALL_X(x)     (x)
+#define BALL_Y(x)     ((x)+2)
+#define BALL_COLOR(x) ((x)+4)
+#define BG_COLOR(x)   ((x)+6)
 
 /*
  * Information about our device
@@ -49,37 +53,39 @@
 struct vga_ball_dev {
 	struct resource res; /* Resource: our registers */
 	void __iomem *virtbase; /* Where registers can be accessed in memory */
-	vga_ball_pos_t position;
+	vga_ball_arg_t state;
 } dev;
 
 /*
- * Write the ball position to the hardware registers
+ * Write all ball parameters to the hardware registers
  */
-static void write_position(vga_ball_pos_t *pos)
+static void write_ball(vga_ball_arg_t *s)
 {
-	iowrite16(pos->x, BALL_X(dev.virtbase));
-	iowrite16(pos->y, BALL_Y(dev.virtbase));
-	dev.position = *pos;
+	iowrite16(s->x, BALL_X(dev.virtbase));
+	iowrite16(s->y, BALL_Y(dev.virtbase));
+	iowrite16(s->ball_color, BALL_COLOR(dev.virtbase));
+	iowrite16(s->bg_color, BG_COLOR(dev.virtbase));
+	dev.state = *s;
 }
 
 /*
  * Handle ioctl() calls from userspace:
- * Read or write the ball position.
+ * Read or write the ball state.
  */
 static long vga_ball_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	vga_ball_arg_t vla;
 
 	switch (cmd) {
-	case VGA_BALL_WRITE_POS:
+	case VGA_BALL_WRITE_BALL:
 		if (copy_from_user(&vla, (vga_ball_arg_t *) arg,
 				   sizeof(vga_ball_arg_t)))
 			return -EACCES;
-		write_position(&vla.position);
+		write_ball(&vla);
 		break;
 
-	case VGA_BALL_READ_POS:
-		vla.position = dev.position;
+	case VGA_BALL_READ_BALL:
+		vla = dev.state;
 		if (copy_to_user((vga_ball_arg_t *) arg, &vla,
 				 sizeof(vga_ball_arg_t)))
 			return -EACCES;
@@ -111,7 +117,7 @@ static struct miscdevice vga_ball_misc_device = {
  */
 static int __init vga_ball_probe(struct platform_device *pdev)
 {
-	vga_ball_pos_t center = { 320, 240 };
+	vga_ball_arg_t initial = { 320, 240, 0xFFFF, 0x0010 };
 	int ret;
 
 	/* Register ourselves as a misc device: creates /dev/vga_ball */
@@ -138,8 +144,8 @@ static int __init vga_ball_probe(struct platform_device *pdev)
 		goto out_release_mem_region;
 	}
 
-	/* Set an initial position: center of screen */
-	write_position(&center);
+	/* Set initial state: center of screen, white ball, dark blue bg */
+	write_ball(&initial);
 
 	return 0;
 

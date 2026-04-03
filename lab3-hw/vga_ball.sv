@@ -1,17 +1,19 @@
 /*
  * Avalon memory-mapped peripheral that generates VGA
- * with a bouncing ball at software-controllable coordinates
+ * with a bouncing ball at software-controllable coordinates and colors
  *
  * Stephen A. Edwards
  * Columbia University
  *
  * Register map (16-bit writedata):
  *
- * Word Offset   15 ······· 0    Meaning
- *      0       |   ball_x   |   X coordinate of ball center (0–639)
- *      1       |   ball_y   |   Y coordinate of ball center (0–479)
+ * Word Offset   15 ·········· 0          Meaning
+ *      0       |    ball_x    |   X coordinate of ball center (0–639)
+ *      1       |    ball_y    |   Y coordinate of ball center (0–479)
+ *      2       | R[15:11] G[10:5] B[4:0] |  Ball color (RGB565)
+ *      3       | R[15:11] G[10:5] B[4:0] |  Background color (RGB565)
  *
- * Byte addresses from the CPU: offset 0 = ball_x, offset 2 = ball_y
+ * Byte addresses from the CPU: 0=ball_x, 2=ball_y, 4=ball_color, 6=bg_color
  * Ball radius is fixed at 16 pixels in hardware.
  * Coordinates are latched at the start of vertical blanking to
  * prevent tearing.
@@ -35,8 +37,12 @@ module vga_ball(input logic         clk,
    /* Ball position registers (written by software) */
    logic [15:0]    ball_x, ball_y;
 
+   /* Color registers (RGB565) */
+   logic [15:0]    ball_color, bg_color;
+
    /* Active copies latched during vertical blanking (used for drawing) */
    logic [15:0]    ball_x_active, ball_y_active;
+   logic [15:0]    ball_color_active, bg_color_active;
 
    parameter BALL_RADIUS = 16;
 
@@ -45,23 +51,43 @@ module vga_ball(input logic         clk,
    /* ---- Register writes from the Avalon bus ---- */
    always_ff @(posedge clk)
      if (reset) begin
-	ball_x <= 16'd320;
-	ball_y <= 16'd240;
+	ball_x     <= 16'd320;
+	ball_y     <= 16'd240;
+	ball_color <= 16'hFFFF;  /* white */
+	bg_color   <= 16'h0010;  /* dark blue */
      end else if (chipselect && write)
        case (address)
-	 3'h0 : ball_x <= writedata;
-	 3'h1 : ball_y <= writedata;
+	 3'h0 : ball_x     <= writedata;
+	 3'h1 : ball_y     <= writedata;
+	 3'h2 : ball_color <= writedata;
+	 3'h3 : bg_color   <= writedata;
        endcase
 
-   /* ---- Latch coordinates at start of vertical blanking ---- */
+   /* ---- Latch at start of vertical blanking to prevent tearing ---- */
    always_ff @(posedge clk)
      if (reset) begin
-	ball_x_active <= 16'd320;
-	ball_y_active <= 16'd240;
+	ball_x_active     <= 16'd320;
+	ball_y_active     <= 16'd240;
+	ball_color_active <= 16'hFFFF;
+	bg_color_active   <= 16'h0010;
      end else if (vcount == 10'd480 && hcount == 11'd0) begin
-	ball_x_active <= ball_x;
-	ball_y_active <= ball_y;
+	ball_x_active     <= ball_x;
+	ball_y_active     <= ball_y;
+	ball_color_active <= ball_color;
+	bg_color_active   <= bg_color;
      end
+
+   /* ---- Expand RGB565 to RGB888 ---- */
+   logic [7:0] ball_r, ball_g, ball_b;
+   logic [7:0] bg_r, bg_g, bg_b;
+
+   assign ball_r = {ball_color_active[15:11], ball_color_active[15:13]};
+   assign ball_g = {ball_color_active[10:5],  ball_color_active[10:9]};
+   assign ball_b = {ball_color_active[4:0],   ball_color_active[4:2]};
+
+   assign bg_r = {bg_color_active[15:11], bg_color_active[15:13]};
+   assign bg_g = {bg_color_active[10:5],  bg_color_active[10:9]};
+   assign bg_b = {bg_color_active[4:0],   bg_color_active[4:2]};
 
    /* ---- Ball drawing logic ---- */
    logic [9:0] pixel_x;
@@ -90,9 +116,9 @@ module vga_ball(input logic         clk,
       {VGA_R, VGA_G, VGA_B} = {8'h0, 8'h0, 8'h0};
       if (VGA_BLANK_n)
 	if (in_ball)
-	  {VGA_R, VGA_G, VGA_B} = {8'hff, 8'hff, 8'hff};  /* white ball */
+	  {VGA_R, VGA_G, VGA_B} = {ball_r, ball_g, ball_b};
 	else
-	  {VGA_R, VGA_G, VGA_B} = {8'h00, 8'h00, 8'h80};  /* dark blue bg */
+	  {VGA_R, VGA_G, VGA_B} = {bg_r, bg_g, bg_b};
    end
 
 endmodule
